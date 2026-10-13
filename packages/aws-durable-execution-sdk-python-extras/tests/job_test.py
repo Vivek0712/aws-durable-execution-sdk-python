@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for the job document."""
+
+from __future__ import annotations
+
+import json
+import math
+
+import pytest
+from aws_durable_execution_sdk_python_microvm_worker import RunHookRequest
+
+from aws_durable_execution_sdk_python_extras.microvm.job import (
+    MAX_RUN_HOOK_PAYLOAD_LENGTH,
+    RunHookPayload,
+    fits_run_hook,
+)
+
+
+def test_writes_compact_json_with_the_job_fields() -> None:
+    payload = RunHookPayload(
+        region="us-east-1",
+        callback_id="cb-1",
+        job_input={"repo": "org/app"},
+        heartbeat_timeout_seconds=60,
+    ).to_json()
+
+    assert payload == (
+        '{"version":1,"region":"us-east-1","job":{"callbackId":"cb-1",'
+        '"heartbeatTimeoutSeconds":60,"input":{"repo":"org/app"}}}'
+    )
+
+
+def test_leaves_out_an_unset_heartbeat_timeout() -> None:
+    payload = RunHookPayload(region="r", callback_id="cb", job_input=None).to_json()
+
+    assert json.loads(payload)["job"] == {"callbackId": "cb", "input": None}
+
+
+def test_keeps_non_ascii_text_so_the_length_counts_code_points() -> None:
+    payload = RunHookPayload(region="r", callback_id="cb", job_input="日😀").to_json()
+
+    assert "日😀" in payload
+
+
+def test_escapes_a_lone_surrogate() -> None:
+    payload = RunHookPayload(
+        region="r", callback_id="cb", job_input="a\ud800"
+    ).to_json()
+
+    payload.encode()
+    assert "\\ud800" in payload
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf])
+def test_rejects_a_float_that_is_not_json(value: float) -> None:
+    with pytest.raises(ValueError, match="JSON compliant"):
+        RunHookPayload(region="r", callback_id="cb", job_input=value).to_json()
+
+
+def test_counts_code_points_against_the_run_hook_limit() -> None:
+    assert fits_run_hook("😀" * MAX_RUN_HOOK_PAYLOAD_LENGTH)
+    assert not fits_run_hook("😀" * (MAX_RUN_HOOK_PAYLOAD_LENGTH + 1))
+
+
+def test_the_worker_reads_the_payload() -> None:
+    # The worker package parses the same contract. A change on one side must
+    # be made on the other.
+    payload = RunHookPayload(
+        region="us-east-1",
+        callback_id="cb-1",
+        job_input={"n": 1},
+        heartbeat_timeout_seconds=30,
+    ).to_json()
+
+    request = RunHookRequest.from_dict(
+        {"microvmId": "mvm-1", "runHookPayload": payload}
+    )
+
+    assert request.payload is not None
+    assert request.payload.region == "us-east-1"
+    job = request.payload.job
+    assert job is not None
+    assert (job.callback_id, job.input, job.heartbeat_timeout_seconds) == (
+        "cb-1",
+        {"n": 1},
+        30.0,
+    )

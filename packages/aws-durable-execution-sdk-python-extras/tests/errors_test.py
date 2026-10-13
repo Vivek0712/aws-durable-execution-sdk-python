@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: 2026-present Amazon.com, Inc. or its affiliates.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for rebuilding MicroVM errors from a child context failure."""
+
+from __future__ import annotations
+
+import pytest
+from aws_durable_execution_sdk_python.exceptions import ChildContextError
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+
+from aws_durable_execution_sdk_python_extras.microvm import (
+    MicrovmDeliveryError,
+    MicrovmError,
+    MicrovmJobFailedError,
+    MicrovmLaunchError,
+    MicrovmTimeoutError,
+)
+
+
+def child_context_error(raised: Exception) -> ChildContextError:
+    """The error that the SDK raises for a child context that raised
+    ``raised``, built the way the SDK builds it, from the checkpoint fields."""
+    try:
+        ErrorObject.from_exception(raised).raise_as_operation_error(ChildContextError)
+    except ChildContextError as error:
+        return error
+    msg = "unreachable"
+    raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "error_class",
+    [
+        MicrovmError,
+        MicrovmLaunchError,
+        MicrovmDeliveryError,
+        MicrovmJobFailedError,
+        MicrovmTimeoutError,
+    ],
+)
+def test_rebuilds_each_microvm_error_class(error_class: type[MicrovmError]) -> None:
+    raised = error_class(message='MicroVM "build": broken', data='{"k":1}')
+
+    rebuilt = MicrovmError.from_child_context_error(
+        "build", child_context_error(raised)
+    )
+
+    assert type(rebuilt) is error_class
+    assert rebuilt.message == 'MicroVM "build": broken'
+    assert rebuilt.data == '{"k":1}'
+    assert rebuilt.error_type == raised.error_type
+
+
+def test_wraps_another_error_type_in_a_plain_microvm_error() -> None:
+    rebuilt = MicrovmError.from_child_context_error(
+        "build", child_context_error(RuntimeError("unexpected"))
+    )
+
+    assert type(rebuilt) is MicrovmError
+    assert rebuilt.message == 'MicroVM "build": unexpected'
+    assert rebuilt.error_type == "RuntimeError"
+
+
+def test_every_microvm_error_is_a_durable_operation_error() -> None:
+    from aws_durable_execution_sdk_python.exceptions import DurableOperationError
+
+    assert issubclass(MicrovmError, DurableOperationError)
+    for error_class in (
+        MicrovmLaunchError,
+        MicrovmDeliveryError,
+        MicrovmJobFailedError,
+        MicrovmTimeoutError,
+    ):
+        assert issubclass(error_class, MicrovmError)
