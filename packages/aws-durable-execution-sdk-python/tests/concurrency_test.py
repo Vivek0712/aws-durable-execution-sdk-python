@@ -4292,6 +4292,7 @@ def test_late_nondeterminism_blocks_early_completion_checkpoint():
                     operation_id=parent_id,
                     sub_type=OperationSubType.PARALLEL,
                     name="parallel",
+                    operation_type=OperationType.CONTEXT,
                 ),
                 ChildConfig(sub_type=OperationSubType.PARALLEL),
             )

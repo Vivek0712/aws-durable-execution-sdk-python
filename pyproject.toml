@@ -60,7 +60,10 @@ extra-dependencies = [
 check = "bash .github/scripts/type-checks.sh"
 
 [tool.hatch.envs.dev-core]
-workspace.members = ["packages/aws-durable-execution-sdk-python"]
+workspace.members = [
+  "packages/aws-durable-execution-sdk-python",
+  "packages/aws-durable-execution-sdk-python-testing",
+]
 dependencies = [
   "pytest",
   "pytest-cov",
