@@ -115,7 +115,7 @@ def test_creates_one_default_client_per_region(
     ]
     # botocore's defaults are 60 seconds each, with legacy retries.
     assert (configs[0].connect_timeout, configs[0].read_timeout) == (5, 30)
-    assert configs[0].retries == {"mode": "standard", "max_attempts": 3}
+    assert configs[0].retries == {"mode": "standard", "total_max_attempts": 3}
 
 
 def test_takes_the_input_and_the_config_by_keyword_only() -> None:

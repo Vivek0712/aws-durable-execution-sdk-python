@@ -465,7 +465,12 @@ class _DefaultClients:
                     config=Config(
                         connect_timeout=_CONNECT_TIMEOUT_SECONDS,
                         read_timeout=_READ_TIMEOUT_SECONDS,
-                        retries={"mode": "standard", "max_attempts": _CLIENT_ATTEMPTS},
+                        retries={
+                            "mode": "standard",
+                            # total_max_attempts counts the first attempt too.
+                            # max_attempts would count only the retries.
+                            "total_max_attempts": _CLIENT_ATTEMPTS,
+                        },
                     ),
                 )
                 self._clients[region] = client
