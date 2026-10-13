@@ -11,13 +11,17 @@ The operation raises the same class on the first run and on every replay:
 1. Inside its child context, the operation raises a subclass, such as
    :class:`MicrovmLaunchError`.
 2. The SDK checkpoints the child context's failure with the class's
-   fully-qualified name as the error type, and the message and data.
-3. The SDK then raises ``ChildContextError`` with those fields, on the first
-   run and on replay alike.
-4. The operation rebuilds the MicroVM error from the error type, with
-   :meth:`MicrovmError.from_child_context_error`.
+   fully-qualified name as the error type, and the message, data, and stack
+   trace.
+3. The SDK then raises ``ChildContextError``, on the first run and on replay
+   alike. It rebuilds the escaping error as ``__cause__`` from its registry
+   of error types.
+4. This module registers every MicroVM class with that registry. So
+   ``__cause__`` is the MicroVM class, and the operation raises it.
 
-So code that catches a subclass stays deterministic.
+The registry also applies to a child context that the caller wraps around the
+operation, and to a ``map`` or ``parallel`` item. The caller then gets
+``ChildContextError``, and its ``__cause__`` is the MicroVM error.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 from aws_durable_execution_sdk_python.exceptions import (
     ChildContextError,
     DurableOperationError,
+    register_operation_error,
 )
 
 
@@ -32,17 +37,17 @@ class MicrovmError(DurableOperationError):
     """The base class of every MicroVM failure.
 
     ``message`` names the operation and keeps the underlying message.
-    ``data`` is the error data of the failure, when it had any.
+    ``data`` and ``stack_trace`` are those of the failure, when it had any.
     """
 
     @classmethod
     def from_child_context_error(
         cls, name: str, error: ChildContextError
     ) -> MicrovmError:
-        """Rebuild the MicroVM error that the operation's child context raised.
+        """Return the MicroVM error that the operation's child context raised.
 
-        1. A checkpointed MicroVM error type gets its own class back, with the
-           checkpointed message and data.
+        1. The SDK rebuilds a registered MicroVM error type as its own class,
+           in ``__cause__``. That error is returned.
         2. Any other error type becomes a plain :class:`MicrovmError`. It keeps
            the original error type in ``error_type``. The operation contains no
            caller code, so every failure in it is a MicroVM failure.
@@ -51,13 +56,9 @@ class MicrovmError(DurableOperationError):
             name: The operation name, for the message of a plain MicrovmError.
             error: The error that ``run_in_child_context`` raised.
         """
-        error_class = _ERROR_CLASSES.get(error.error_type)
-        if error_class is not None:
-            return error_class(
-                message=error.message,
-                data=error.data,
-                stack_trace=error.stack_trace,
-            )
+        cause = error.__cause__
+        if isinstance(cause, MicrovmError):
+            return cause
         return MicrovmError(
             message=f'MicroVM "{name}": {error.message}',
             error_type=error.error_type,
@@ -67,7 +68,15 @@ class MicrovmError(DurableOperationError):
 
 
 class MicrovmLaunchError(MicrovmError):
-    """``RunMicrovm`` failed after all retries, so no MicroVM runs the job."""
+    """``RunMicrovm`` failed after all retries.
+
+    When the last attempt got an answer, such as a ``ValidationException``,
+    no MicroVM runs the job. When the last attempt timed out or lost its
+    connection, the service may have created the MicroVM anyway. That MicroVM
+    then runs the job, and the operation cannot terminate it, because it never
+    learned the MicroVM's ID. The MicroVM ends at its maximum duration. So a
+    caller that runs the job again after this error can run it twice.
+    """
 
 
 class MicrovmDeliveryError(MicrovmError):
@@ -92,15 +101,13 @@ class MicrovmTimeoutError(MicrovmError):
     """
 
 
-_ERROR_CLASSES: dict[str, type[MicrovmError]] = {
-    f"{error_class.__module__}.{error_class.__qualname__}": error_class
-    for error_class in (
-        MicrovmError,
-        MicrovmLaunchError,
-        MicrovmDeliveryError,
-        MicrovmJobFailedError,
-        MicrovmTimeoutError,
-    )
-}
-"""The MicroVM error classes, keyed by the error type that the SDK
-checkpoints for them: the fully-qualified class name."""
+for _error_class in (
+    MicrovmError,
+    MicrovmLaunchError,
+    MicrovmDeliveryError,
+    MicrovmJobFailedError,
+    MicrovmTimeoutError,
+):
+    # Each class takes the four keywords that the registry passes: message,
+    # error_type, data, and stack_trace.
+    register_operation_error(_error_class)

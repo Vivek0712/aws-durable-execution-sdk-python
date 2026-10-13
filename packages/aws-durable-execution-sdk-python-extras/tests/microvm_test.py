@@ -109,7 +109,7 @@ def catching(config: MicrovmConfig) -> Callable[..., Any]:
     @durable_execution
     def handler(event: Any, context: DurableContext) -> Any:
         try:
-            return {"result": microvm(context, "build", event, config)}
+            return {"result": microvm(context, "build", job_input=event, config=config)}
         except MicrovmError as error:
             return {"error": type(error).__name__, "message": error.message}
 
@@ -196,7 +196,7 @@ def test_fails_with_a_microvm_error_for_a_result_that_is_not_json(
     error = outcome(result)
     assert error["error"] == "MicrovmError"
     assert error["message"].startswith(
-        'MicroVM "build": the job result could not be read: '
+        'MicroVM "build": the job result could not be read (SerDesError): '
     )
     assert len(client.requests("terminate_microvm")) == 1
 
@@ -349,7 +349,7 @@ def test_raises_the_same_class_after_the_handler_stops_catching(
 
     @durable_execution
     def handler(event: Any, context: DurableContext) -> Any:
-        return microvm(context, "build", event, config)
+        return microvm(context, "build", job_input=event, config=config)
 
     result = run(handler, {}, fail_with("RuntimeError", "broken"))
 
@@ -366,7 +366,8 @@ def test_runs_in_the_context_that_the_caller_passes(run: Any, fake_client: Any) 
     @durable_execution
     def handler(event: Any, context: DurableContext) -> Any:
         return context.run_in_child_context(
-            lambda child: microvm(child, "build", event, config), name="outer"
+            lambda child: microvm(child, "build", job_input=event, config=config),
+            name="outer",
         )
 
     result = run(handler, {}, succeed_with(7))
@@ -385,7 +386,7 @@ def test_runs_one_microvm_per_map_item(run: Any, fake_client: Any) -> None:
         return context.map(
             [1, 2, 3],
             lambda item_context, item, index, items: microvm(
-                item_context, f"shard-{item}", item, config
+                item_context, f"shard-{item}", job_input=item, config=config
             ),
             name="shards",
         ).get_results()
@@ -453,3 +454,91 @@ def test_requests_match_the_lambda_microvms_api_model(run: Any) -> None:
         stub.assert_no_pending_responses()
     client.close()
     assert outcome(result) == {"result": "done"}
+
+
+def test_keeps_the_class_inside_the_callers_child_context(
+    run: Any, fake_client: Any
+) -> None:
+    # The MicroVM classes are in the SDK's error registry. So a caller's own
+    # child context rebuilds the MicroVM error as its __cause__, on the first
+    # run and on replay alike.
+    from aws_durable_execution_sdk_python.exceptions import ChildContextError
+
+    from aws_durable_execution_sdk_python_extras.microvm import MicrovmJobFailedError
+
+    config = config_with(fake_client())
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            context.run_in_child_context(
+                lambda child: microvm(child, "build", job_input=event, config=config),
+                name="outer",
+            )
+        except ChildContextError as error:
+            cause = error.__cause__
+            seen = {
+                "cause": type(cause).__name__,
+                "is_job_failed": isinstance(cause, MicrovmJobFailedError),
+            }
+        first = context.step(lambda _: seen, name="first")
+        # The wait makes the SDK replay the handler, and the outer context
+        # fails again from its checkpoint.
+        context.wait(Duration.from_seconds(1), name="replay")
+        return {"first": first, "replay": seen}
+
+    result = run(handler, {}, fail_with("RuntimeError", "broken"))
+
+    expected = {"cause": "MicrovmJobFailedError", "is_job_failed": True}
+    assert outcome(result) == {"first": expected, "replay": expected}
+
+
+def test_keeps_the_stack_trace_that_the_microvm_reports(
+    run: Any, fake_client: Any
+) -> None:
+    config = config_with(fake_client())
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            microvm(context, "build", job_input=event, config=config)
+        except MicrovmError as error:
+            return error.stack_trace
+        return None
+
+    def complete(runner: DurableFunctionTestRunner, callback_id: str) -> None:
+        runner.send_callback_failure(
+            callback_id,
+            ErrorObject(
+                message="broken", type="Error", data=None, stack_trace=["at job"]
+            ),
+        )
+
+    result = run(handler, {}, complete)
+
+    assert outcome(result) == ["at job"]
+
+
+def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
+    run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A launch checkpoint from another release, for example after a rollback.
+    from aws_durable_execution_sdk_python_extras.microvm import operation
+
+    original = operation._OperationScope._launch  # noqa: SLF001
+
+    def launch_for_http(self: Any, callback_id: str, payload: str) -> Any:
+        launched = original(self, callback_id, payload)
+        return operation.LaunchResult(microvm_id=launched.microvm_id, delivery="http")
+
+    monkeypatch.setattr(operation._OperationScope, "_launch", launch_for_http)  # noqa: SLF001
+    client = fake_client()
+
+    result = run(catching(config_with(client)), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmDeliveryError",
+        "message": 'MicroVM "build": the launch prepared the delivery "http", '
+        "which this release does not support",
+    }
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]

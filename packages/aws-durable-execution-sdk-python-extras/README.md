@@ -28,10 +28,10 @@ CONFIG = MicrovmConfig(
 
 @durable_execution
 def handler(event: dict, context: DurableContext) -> dict:
-    return microvm(context, "build", {"repo": event["repo"]}, CONFIG)
+    return microvm(context, "build", job_input={"repo": event["repo"]}, config=CONFIG)
 ```
 
-The first argument is the context that the call runs in. Inside a child context or a `map` item, pass that context, so the operation's steps belong to it.
+The first argument is the context that the call runs in. Inside a child context or a `map` item, pass that context, so the operation's steps belong to it. `job_input` and `config` are keyword-only. A job can be a string, and so is the name. So positional arguments in the wrong order would pass validation and run the wrong job.
 
 The code in the MicroVM receives the job and reports its result. The worker package [`aws-durable-execution-sdk-python-microvm-worker`](../aws-durable-execution-sdk-python-microvm-worker) does this, and so does the JavaScript worker. The job document is the same in every SDK language.
 
@@ -46,6 +46,12 @@ The operation runs its durable operations in one child context named after the s
 
 A terminate failure does not fail the operation. The job's outcome is already recorded at that point. So the operation logs an error instead of raising. The MicroVM then keeps running, and is billed, until the platform ends it at its maximum duration: the operation timeout plus 5 minutes.
 
+The terminate step runs only when the operation sees the job's outcome. In these cases it never does, and the MicroVM also runs until its maximum duration:
+
+- A `map` or `parallel` completes early, for example with `min_successful`, while an item still waits for its MicroVM. The SDK never runs that item again.
+- The execution fails, times out, or is stopped while the operation waits.
+- Every launch attempt timed out or lost its connection, but the service created the MicroVM anyway. The operation never learned the MicroVM's ID.
+
 The `run` hook payload holds at most 4,096 Unicode code points. It includes the callback ID and the job's fields, so an input of about 3,600 code points fits. The operation fails a larger job with `MicrovmDeliveryError` before the launch. Delivery over HTTP, for larger jobs, comes in a later release.
 
 ### Errors
@@ -54,7 +60,7 @@ Every MicroVM failure is a `MicrovmError`. Catch the base class for all of them,
 
 | Error | When |
 |---|---|
-| `MicrovmLaunchError` | `RunMicrovm` failed after all retries, so no MicroVM runs the job. |
+| `MicrovmLaunchError` | `RunMicrovm` failed after all retries. When the last attempt timed out or lost its connection, the service may have created the MicroVM anyway, and it then runs the job. So running the job again after this error can run it twice. |
 | `MicrovmDeliveryError` | The job is too large for the `run` hook. |
 | `MicrovmJobFailedError` | The job handler in the MicroVM failed. The message includes the error type that the MicroVM reported. |
 | `MicrovmTimeoutError` | No result arrived within `timeout`, or no heartbeat within `heartbeat_timeout`. A MicroVM that crashed ends this way. |
@@ -73,7 +79,7 @@ except MicrovmError:
     ...  # Any other MicroVM failure.
 ```
 
-The class is the same on the first run and on every replay, so code that branches on it stays deterministic. An invalid config raises `ValueError`, and an input that is not JSON-serializable raises `TypeError`, before any durable operation starts.
+The class is the same on the first run and on every replay, so code that branches on it stays deterministic. A `microvm` call inside your own child context, or inside a `map` or `parallel` item, reaches the code around that context as the SDK's `ChildContextError`. Its `__cause__` is the MicroVM error, so check `isinstance(error.__cause__, MicrovmTimeoutError)` there. An invalid config raises `ValueError`, and an input that is not JSON-serializable raises `TypeError`, before any durable operation starts.
 
 ### Retries
 
@@ -98,4 +104,6 @@ The MicroVM execution role (`execution_role_arn`) needs `lambda:SendDurableExecu
 
 ### Subtypes
 
-The operation records the SDK's default subtypes for now. The child context, the steps, and the callback record the same subtypes as any other child context, step, and callback. The MicroVM subtypes of the JavaScript operation, such as `MicrovmLaunch`, come when the Python SDK accepts custom subtypes.
+The JavaScript operation records MicroVM subtypes, such as `Microvm` on the child context and `MicrovmLaunch` on the launch step. This package records the SDK's default subtypes for now, because the Python SDK does not accept custom subtypes yet.
+
+On replay, the SDK compares the subtype of each operation with its checkpoint. A mismatch fails the execution with `NonDeterministicExecutionError`. So a release that changed the subtypes would fail every execution that waits on a MicroVM during the deploy. So this package is published only after the SDK accepts custom subtypes, and it records the MicroVM subtypes from its first release.

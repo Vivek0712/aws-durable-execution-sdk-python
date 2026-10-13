@@ -112,7 +112,11 @@ def composed(fake_client: Any) -> Iterator[Callable[..., Any]]:
         @durable_execution
         def handler(event: Any, context: DurableContext) -> Any:
             try:
-                return {"result": microvm(context, "build", event, holder["config"])}
+                return {
+                    "result": microvm(
+                        context, "build", job_input=event, config=holder["config"]
+                    )
+                }
             except MicrovmError as error:
                 return {"error": type(error).__name__, "message": error.message}
 

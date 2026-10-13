@@ -12,6 +12,7 @@ it. A change to the document must be made in every language.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,8 +53,10 @@ class RunHookPayload:
         1. Non-ASCII text stays as it is, as ``JSON.stringify`` writes it. So
            the length counts the same code points as the JavaScript SDK's
            payload.
-        2. A lone surrogate is not valid in the UTF-8 request body. So a
-           payload that contains one is written with ``\\uXXXX`` escapes.
+        2. A lone surrogate is not valid in the UTF-8 request body. So each
+           one is written as a ``\\uXXXX`` escape, as ``JSON.stringify``
+           writes it. A Python ``str`` holds an astral character as one code
+           point, so every surrogate in it is a lone one.
         3. ``allow_nan=False`` rejects ``nan`` and infinite floats, because
            the worker rejects the ``NaN`` and ``Infinity`` tokens.
 
@@ -69,11 +72,12 @@ class RunHookPayload:
         text = json.dumps(
             document, allow_nan=False, ensure_ascii=False, separators=(",", ":")
         )
-        try:
-            text.encode()
-        except UnicodeEncodeError:
-            return json.dumps(document, allow_nan=False, separators=(",", ":"))
-        return text
+        # A surrogate appears only inside a JSON string. So the escape is
+        # valid JSON, and it decodes to the same surrogate.
+        return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def fits_run_hook(payload: str) -> bool:

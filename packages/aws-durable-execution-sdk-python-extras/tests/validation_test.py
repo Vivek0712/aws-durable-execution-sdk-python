@@ -61,20 +61,20 @@ def test_rejects_an_invalid_call_before_any_durable_operation(
     name: str, fields: dict[str, Any], message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        microvm(NoOperations(), name, {}, config(**fields))  # type: ignore[arg-type]
+        microvm(NoOperations(), name, job_input={}, config=config(**fields))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("job_input", [{1, 2}, math.nan, {"x": math.inf}])
 def test_rejects_an_input_that_is_not_json(job_input: Any) -> None:
     with pytest.raises(TypeError, match="must be JSON-serializable"):
-        microvm(NoOperations(), "build", job_input, config())  # type: ignore[arg-type]
+        microvm(NoOperations(), "build", job_input=job_input, config=config())  # type: ignore[arg-type]
 
 
 def test_rejects_a_call_without_a_region(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AWS_REGION")
 
     with pytest.raises(ValueError, match="cannot determine the AWS Region"):
-        microvm(NoOperations("not-an-arn"), "build", {}, config())  # type: ignore[arg-type]
+        microvm(NoOperations("not-an-arn"), "build", job_input={}, config=config())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -111,3 +111,8 @@ def test_creates_one_default_client_per_region(
         ("lambda-microvms", "us-east-1"),
         ("lambda-microvms", "eu-west-1"),
     ]
+
+
+def test_takes_the_input_and_the_config_by_keyword_only() -> None:
+    with pytest.raises(TypeError, match="positional argument"):
+        microvm(NoOperations(), "build", {}, config())  # type: ignore[arg-type, misc]

@@ -90,6 +90,7 @@ class LaunchResult:
 def microvm(
     context: DurableContext,
     name: str,
+    *,
     job_input: Any,
     config: MicrovmConfig,
 ) -> Any:
@@ -119,6 +120,10 @@ def microvm(
 
     Pass the context that the call runs in. Inside a ``map`` item or a child
     context, pass that context, so the operation's steps belong to it.
+
+    ``job_input`` and ``config`` are keyword-only. A job can be a string, and
+    the name is a string. So positional arguments in the wrong order would
+    pass validation and run the wrong job.
 
     Args:
         context: The context to create the durable operations in.
@@ -274,8 +279,21 @@ class _OperationScope:
             )
         except StepError as error:
             msg = f'MicroVM "{name}": the launch failed: {error.message}'
-            raise MicrovmLaunchError(message=msg, data=error.data) from error
+            raise MicrovmLaunchError(
+                message=msg, data=error.data, stack_trace=error.stack_trace
+            ) from error
         microvm_id = launched.microvm_id
+        if launched.delivery != RUN_HOOK_DELIVERY:
+            # The launch checkpoint comes from a release with a delivery that
+            # this release does not know, for example after a rollback. This
+            # release cannot deliver the job. So it terminates the MicroVM and
+            # fails, the same way on every replay.
+            self._terminate(child, microvm_id)
+            msg = (
+                f'MicroVM "{name}": the launch prepared the delivery '
+                f'"{launched.delivery}", which this release does not support'
+            )
+            raise MicrovmDeliveryError(msg)
 
         try:
             result = callback.result()
@@ -294,7 +312,7 @@ class _OperationScope:
             "imageIdentifier": config.image_identifier,
             "executionRoleArn": config.execution_role_arn,
             # A callback ID can be 1,024 characters, and the client token
-            # allows 64. The SHA-256 hex digest is 64 characters.
+            # allows 128. The SHA-256 hex digest is 64 characters.
             "clientToken": hashlib.sha256(callback_id.encode()).hexdigest(),
             "ingressNetworkConnectors": list(
                 config.ingress_network_connectors
@@ -327,8 +345,8 @@ class _OperationScope:
         The job's outcome is already recorded when terminate runs, and the
         MicroVM's maximum duration bounds how long it can keep running. So a
         terminate failure must not discard the outcome. The step's failure is
-        checkpointed. So on replay the step fails again at once, and this
-        method logs again, with the same outcome.
+        checkpointed. So on replay the step fails again at once, with the same
+        outcome.
         """
         try:
             child.step(
@@ -370,6 +388,7 @@ class _OperationScope:
             return MicrovmTimeoutError(
                 message=f'MicroVM "{name}": the job timed out: {error.message}',
                 data=error.data,
+                stack_trace=error.stack_trace,
             )
         if isinstance(error, CallbackError):
             # The SDK raises CallbackExternalError with the message and the
@@ -380,13 +399,18 @@ class _OperationScope:
             return MicrovmJobFailedError(
                 message=f'MicroVM "{name}": the job failed{detail}: {error.message}',
                 data=error.data,
+                stack_trace=error.stack_trace,
             )
         # Any other failure, such as a result that is not valid JSON. The
-        # operation contains no caller code, so it is a MicroVM failure.
-        message = getattr(error, "message", None) or str(error)
+        # operation contains no caller code, so it is a MicroVM failure. The
+        # SDK checkpoints the class of a MicroVM error as its type. So the
+        # message names the original type.
+        detail = getattr(error, "message", None) or str(error)
         return MicrovmError(
-            message=f'MicroVM "{name}": the job result could not be read: {message}',
-            error_type=_qualified_type(error),
+            message=(
+                f'MicroVM "{name}": the job result could not be read '
+                f"({type(error).__name__}): {detail}"
+            )
         )
 
     def _connector_arn(self, connector: str) -> str:
@@ -430,22 +454,17 @@ _DEFAULT_CLIENTS = _DefaultClients()
 def _reported_error_type(callback: Callback) -> str | None:
     """The error type that the MicroVM reported for a failed callback.
 
+    ``CallbackExternalError`` carries the message and the data, not the type.
+    The callback's checkpoint holds the type, and it is the same on the first
+    run and on replay. ``ExecutionState`` is internal to the SDK. So the
+    package's dependency has an upper bound on the SDK's major version.
+
     ``Error`` is the type that a worker reports for a value that is not an
     exception. It names nothing, so it is left out.
     """
     error = callback.state.get_checkpoint_result(callback.operation_id).error
     reported = None if error is None else error.type
     return None if reported in {None, "", "Error"} else reported
-
-
-def _qualified_type(error: BaseException) -> str:
-    """The fully-qualified class name, with builtins left unqualified, as the
-    SDK writes an error type."""
-    error_class = type(error)
-    module = (
-        "" if error_class.__module__ == "builtins" else f"{error_class.__module__}."
-    )
-    return f"{module}{error_class.__qualname__}"
 
 
 def _partition_and_region(arn: str) -> tuple[str, str]:

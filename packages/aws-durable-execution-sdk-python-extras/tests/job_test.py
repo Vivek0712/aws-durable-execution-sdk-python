@@ -44,13 +44,19 @@ def test_keeps_non_ascii_text_so_the_length_counts_code_points() -> None:
     assert "日😀" in payload
 
 
-def test_escapes_a_lone_surrogate() -> None:
+def test_escapes_only_a_lone_surrogate() -> None:
+    # JSON.stringify escapes a lone surrogate and keeps other text. So the
+    # same job has the same length in both languages.
     payload = RunHookPayload(
-        region="r", callback_id="cb", job_input="a\ud800"
+        region="r", callback_id="cb", job_input="é" * 1000 + "\ud800"
     ).to_json()
+    plain = RunHookPayload(region="r", callback_id="cb", job_input="é" * 1000).to_json()
 
     payload.encode()
     assert "\\ud800" in payload
+    assert "é" * 1000 in payload
+    assert len(payload) == len(plain) + len("\\ud800")
+    assert json.loads(payload)["job"]["input"] == "é" * 1000 + "\ud800"
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf])
