@@ -87,10 +87,11 @@ The launch and terminate steps retry with `default_microvm_retry_strategy`, unle
 
 ### Defaults and limits
 
-- `timeout` must be between 1 second and 8 hours, because a MicroVM lives at most 8 hours. The MicroVM's `maximumDurationInSeconds` is `timeout` plus 5 minutes, at most 8 hours.
+- `timeout` must be between 1 second and 8 hours, because a MicroVM lives at most 8 hours. The MicroVM's `maximumDurationInSeconds` is `timeout` plus 5 minutes, at most 8 hours. So a timeout above 7 hours 55 minutes leaves the MicroVM less than 5 minutes beyond the callback's timeout.
+- `job_input` is sent as JSON. So the MicroVM receives what `json.dumps` writes: a tuple arrives as a list, and a dict key that is not a string arrives as a string.
 - The MicroVM gets the `NO_INGRESS` connector, because the job arrives in the `run` hook, and the `INTERNET_EGRESS` connector, because it needs egress to reach the Lambda callback APIs.
 - The Region comes from the durable execution ARN, or from `AWS_REGION`.
-- Without a `client`, the operation creates one `lambda-microvms` client per Region, on first use.
+- Without a `client`, the operation creates one `lambda-microvms` client per Region, on first use. It has a 5-second connect timeout, a 30-second read timeout, and 3 attempts in botocore's standard retry mode. So one launch or terminate attempt takes at most about 2 minutes. A call that runs past the function's timeout records no outcome for its step attempt, and the step runs again. The launch is idempotent through its client token, so it is repeated, not doubled.
 
 ### Permissions
 

@@ -55,7 +55,8 @@ class MicrovmConfig:
 
     It must be between 1 second and 8 hours, because a MicroVM lives at most
     8 hours. The MicroVM's ``maximumDurationInSeconds`` is this timeout plus 5
-    minutes, at most 8 hours.
+    minutes, at most 8 hours. So a timeout above 7 hours 55 minutes leaves the
+    MicroVM less than 5 minutes beyond the callback's timeout.
     """
 
     heartbeat_timeout: Duration | None = None
@@ -97,5 +98,9 @@ class MicrovmConfig:
     """The boto3 ``lambda-microvms`` client.
 
     Defaults to one client per Region, created on first use. The Region comes
-    from the durable execution ARN.
+    from the durable execution ARN. The default client has a 5-second connect
+    timeout, a 30-second read timeout, and 3 attempts in botocore's standard
+    retry mode. A client that you pass keeps its own settings. Keep each call
+    shorter than the function's timeout, because a call that runs past it
+    records no outcome for the step attempt.
     """

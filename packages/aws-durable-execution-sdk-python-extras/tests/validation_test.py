@@ -94,10 +94,12 @@ def test_creates_one_default_client_per_region(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created: list[tuple[str, str]] = []
+    configs: list[Any] = []
 
     class Session:
-        def client(self, service: str, region_name: str) -> object:
+        def client(self, service: str, region_name: str, config: Any) -> object:
             created.append((service, region_name))
+            configs.append(config)
             return object()
 
     monkeypatch.setattr(operation.boto3.session, "Session", Session)
@@ -111,6 +113,9 @@ def test_creates_one_default_client_per_region(
         ("lambda-microvms", "us-east-1"),
         ("lambda-microvms", "eu-west-1"),
     ]
+    # botocore's defaults are 60 seconds each, with legacy retries.
+    assert (configs[0].connect_timeout, configs[0].read_timeout) == (5, 30)
+    assert configs[0].retries == {"mode": "standard", "max_attempts": 3}
 
 
 def test_takes_the_input_and_the_config_by_keyword_only() -> None:

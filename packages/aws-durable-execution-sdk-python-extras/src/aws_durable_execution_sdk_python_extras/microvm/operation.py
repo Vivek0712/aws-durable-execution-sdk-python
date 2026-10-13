@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import boto3
+from botocore.config import Config
 from aws_durable_execution_sdk_python.config import (
     CallbackConfig,
     Duration,
@@ -59,8 +60,23 @@ LAUNCH_MARGIN_SECONDS = 300
 """The time added to the operation timeout to get the MicroVM's maximum
 duration.
 
-The MicroVM must outlive the job's callback, or the platform terminates it
-before the job can report. The margin covers the launch.
+The MicroVM should outlive the job's callback, or the platform terminates it
+before the job can report. The margin covers the launch. The maximum duration
+is capped at 8 hours. So with a timeout near 8 hours, the margin shrinks, and
+at 8 hours only the launch delay remains: the callback's timeout starts before
+the launch, and the MicroVM's lifetime starts after it.
+"""
+
+_CONNECT_TIMEOUT_SECONDS = 5
+_READ_TIMEOUT_SECONDS = 30
+_CLIENT_ATTEMPTS = 3
+"""The default client's limits.
+
+botocore defaults to 60-second connect and read timeouts, with its legacy
+retries. A launch or terminate call that runs past the Lambda invocation's
+timeout records no outcome for its step attempt. These limits keep one step
+attempt to about 2 minutes. The launch is idempotent through its client token,
+so an attempt that ran out of time is repeated, not doubled.
 """
 
 RUN_HOOK_DELIVERY = "run-hook"
@@ -129,7 +145,9 @@ def microvm(
         context: The context to create the durable operations in.
         name: The child context name. It also prefixes the inner operations.
         job_input: The job's input. It must be JSON-serializable, and the same
-            on every replay.
+            on every replay. It is sent as JSON, so the MicroVM receives what
+            ``json.dumps`` writes: a tuple arrives as a list, and a dict key
+            that is not a string arrives as a string.
         config: The MicroVM and the timeouts.
 
     Returns:
@@ -442,7 +460,13 @@ class _DefaultClients:
             client = self._clients.get(region)
             if client is None:
                 client = boto3.session.Session().client(
-                    "lambda-microvms", region_name=region
+                    "lambda-microvms",
+                    region_name=region,
+                    config=Config(
+                        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+                        read_timeout=_READ_TIMEOUT_SECONDS,
+                        retries={"mode": "standard", "max_attempts": _CLIENT_ATTEMPTS},
+                    ),
                 )
                 self._clients[region] = client
             return client
