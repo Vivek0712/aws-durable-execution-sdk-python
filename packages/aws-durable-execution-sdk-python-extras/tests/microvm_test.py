@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ from aws_durable_execution_sdk_python_extras.microvm import (
     MicrovmError,
     microvm,
 )
+from aws_durable_execution_sdk_python_extras.microvm.job import RunHookPayload
 
 
 WAIT = 30
@@ -160,6 +162,29 @@ def test_records_the_operations_in_one_child_context(
     ]
 
 
+def test_checkpoints_the_launch_as_plain_json(run: Any, fake_client: Any) -> None:
+    result = run(catching(config_with(fake_client())), {}, succeed_with(1))
+
+    launch = result.get_context("build").get_step("build.launch")
+    # The JavaScript operation checkpoints the same document, so a reader of
+    # the execution history finds the MicroVM ID in both.
+    assert launch.result is not None
+    assert json.loads(launch.result) == {"microvmId": "mvm-1", "delivery": "run-hook"}
+
+
+def test_keeps_empty_connector_tuples_empty(run: Any, fake_client: Any) -> None:
+    client = fake_client()
+    config = config_with(
+        client, ingress_network_connectors=(), egress_network_connectors=()
+    )
+
+    run(catching(config), {}, succeed_with(None))
+
+    [launch] = client.requests("run_microvm")
+    assert launch["ingressNetworkConnectors"] == []
+    assert launch["egressNetworkConnectors"] == []
+
+
 def test_passes_the_optional_launch_settings(run: Any, fake_client: Any) -> None:
     client = fake_client()
     config = config_with(
@@ -183,7 +208,7 @@ def test_passes_the_optional_launch_settings(run: Any, fake_client: Any) -> None
     assert "heartbeatTimeoutSeconds" not in json.loads(launch["runHookPayload"])["job"]
 
 
-def test_fails_with_a_microvm_error_for_a_result_that_is_not_json(
+def test_fails_with_a_job_failed_error_for_a_result_that_is_not_json(
     run: Any, fake_client: Any
 ) -> None:
     client = fake_client()
@@ -194,7 +219,7 @@ def test_fails_with_a_microvm_error_for_a_result_that_is_not_json(
     result = run(catching(config_with(client)), {}, complete)
 
     error = outcome(result)
-    assert error["error"] == "MicrovmError"
+    assert error["error"] == "MicrovmJobFailedError"
     assert error["message"].startswith(
         'MicroVM "build": the job result could not be read (SerDesError): '
     )
@@ -338,8 +363,35 @@ def test_fails_a_job_too_large_for_the_run_hook_before_the_launch(
 
     error = outcome(result)
     assert error["error"] == "MicrovmDeliveryError"
+    assert "the job is at least " in error["message"]
     assert "the run hook accepts at most 4096" in error["message"]
     assert client.calls == []
+    # The job does not fit even without the callback ID. So no callback is
+    # left open until its timeout.
+    assert result.get_context("build").child_operations == []
+
+
+def test_fails_a_job_that_fits_only_without_the_callback_id(
+    run: Any, fake_client: Any
+) -> None:
+    client = fake_client()
+    empty = RunHookPayload(
+        region="us-west-2",
+        callback_id="",
+        job_input="",
+        heartbeat_timeout_seconds=None,
+    ).to_json()
+    job_input = "x" * (MAX_RUN_HOOK_PAYLOAD_LENGTH - len(empty))
+
+    result = run(catching(config_with(client)), job_input)
+
+    error = outcome(result)
+    assert error["error"] == "MicrovmDeliveryError"
+    assert "the job is at least " not in error["message"]
+    assert "the run hook accepts at most 4096" in error["message"]
+    assert client.calls == []
+    [callback] = result.get_context("build").child_operations
+    assert callback.name == "build.callback"
 
 
 def test_raises_the_same_class_after_the_handler_stops_catching(
@@ -542,3 +594,49 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
         "which this release does not support",
     }
     assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_terminates_and_fails_for_a_launch_checkpoint_without_a_delivery(
+    run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aws_durable_execution_sdk_python_extras.microvm import operation
+
+    original = operation.LaunchResult.to_dict
+
+    def without_delivery(self: Any) -> dict[str, Any]:
+        data = original(self)
+        del data["delivery"]
+        return data
+
+    monkeypatch.setattr(operation.LaunchResult, "to_dict", without_delivery)
+    client = fake_client()
+
+    result = run(catching(config_with(client)), {})
+
+    assert outcome(result)["error"] == "MicrovmDeliveryError"
+    assert client.requests("terminate_microvm") == [{"microvmIdentifier": "mvm-1"}]
+
+
+def test_leaves_out_the_error_type_when_the_checkpoint_shape_changed() -> None:
+    # The checkpoint state is internal to the SDK, and can change in a 2.x
+    # release.
+    from aws_durable_execution_sdk_python_extras.microvm import operation
+
+    callback: Any = SimpleNamespace(state=object(), operation_id="op")
+
+    assert operation._reported_error_type(callback) is None  # noqa: SLF001
+
+
+def test_names_the_type_of_a_launch_error_without_a_message(
+    run: Any, fake_client: Any
+) -> None:
+    class Silent(fake_client):  # type: ignore[misc, valid-type]
+        def run_microvm(self, **request: Any) -> dict[str, Any]:
+            raise RuntimeError
+
+    result = run(catching(config_with(Silent())), {})
+
+    assert outcome(result) == {
+        "error": "MicrovmLaunchError",
+        "message": 'MicroVM "build": the launch failed: RuntimeError',
+    }

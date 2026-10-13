@@ -8,7 +8,16 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from botocore.exceptions import EndpointConnectionError, ReadTimeoutError
+from botocore.exceptions import (
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    HTTPClientError,
+    ProxyConnectionError,
+    ReadTimeoutError,
+    ResponseStreamingError,
+    SSLError,
+)
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     default_microvm_retry_strategy,
@@ -26,6 +35,9 @@ from aws_durable_execution_sdk_python_extras.microvm import (
         ("ConflictException", 409),
         ("SomethingNew", 503),
         ("SomethingNew", 429),
+        ("RequestTimeout", 408),
+        ("RequestTimeoutException", 408),
+        ("PriorRequestNotComplete", 400),
     ],
 )
 def test_retries_a_transient_service_error(
@@ -43,7 +55,13 @@ def test_retries_a_transient_service_error(
         TimeoutError("slow"),
         ConnectionResetError("reset"),
         EndpointConnectionError(endpoint_url="https://example"),
+        ConnectTimeoutError(endpoint_url="https://example"),
         ReadTimeoutError(endpoint_url="https://example"),
+        ConnectionClosedError(endpoint_url="https://example"),
+        ProxyConnectionError(proxy_url="https://proxy", error="refused"),
+        SSLError(endpoint_url="https://example", error=OSError("handshake")),
+        ResponseStreamingError(error="truncated"),
+        HTTPClientError(error="reset"),
     ],
 )
 def test_retries_a_connection_failure_or_a_timeout(error: Exception) -> None:
@@ -56,7 +74,9 @@ def test_retries_a_connection_failure_or_a_timeout(error: Exception) -> None:
         ("ValidationException", 400),
         ("AccessDeniedException", 403),
         ("ResourceNotFoundException", 404),
-        ("InsufficientCapacityException", 400),
+        # The service answers it with HTTP 500, so the code check must run
+        # before the status check.
+        ("InsufficientCapacityException", 500),
     ],
 )
 def test_does_not_retry_a_permanent_service_error(

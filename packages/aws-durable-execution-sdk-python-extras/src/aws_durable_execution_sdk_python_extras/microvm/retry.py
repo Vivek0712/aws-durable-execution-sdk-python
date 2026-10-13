@@ -7,13 +7,8 @@ from __future__ import annotations
 
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.retries import RetryDecision
-from botocore.exceptions import (
-    ClientError,
-    ConnectionClosedError,
-    ConnectTimeoutError,
-    EndpointConnectionError,
-    ReadTimeoutError,
-)
+from botocore.exceptions import ClientError, HTTPClientError
+from botocore.exceptions import ConnectionError as BotocoreConnectionError
 
 
 MAX_ATTEMPTS = 5
@@ -31,16 +26,32 @@ _RETRYABLE_ERROR_CODES = frozenset(
         "ServiceUnavailableException",
         # Another transition of the same MicroVM is in progress.
         "ConflictException",
+        # The transient codes of botocore's standard retry mode.
+        "RequestTimeout",
+        "RequestTimeoutException",
+        "PriorRequestNotComplete",
+    }
+)
+
+_NON_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        # HTTP 500, but the Region has no capacity for the MicroVM. A retry
+        # seconds later fails the same way, and the JavaScript SDK does not
+        # retry it either. The check runs before the status check.
+        "InsufficientCapacityException",
     }
 )
 
 _RETRYABLE_ERROR_TYPES: tuple[type[Exception], ...] = (
     TimeoutError,
     ConnectionError,
-    EndpointConnectionError,
-    ConnectionClosedError,
-    ConnectTimeoutError,
-    ReadTimeoutError,
+    # botocore's connection and HTTP errors do not subclass the builtin
+    # ConnectionError. These two bases cover EndpointConnectionError,
+    # ConnectTimeoutError, ProxyConnectionError, SSLError, ReadTimeoutError,
+    # ConnectionClosedError, and ResponseStreamingError. botocore's standard
+    # retry mode treats the same two bases as transient.
+    BotocoreConnectionError,
+    HTTPClientError,
 )
 
 
@@ -55,8 +66,10 @@ def default_microvm_retry_strategy(error: Exception, attempt: int) -> RetryDecis
 
     1. A service error whose code shows a transient failure, such as
        ``ThrottlingException`` or ``InternalServerException``.
-    2. A service error with HTTP status 429, or 500 and above.
-    3. A connection failure or a timeout.
+    2. A service error with HTTP status 429, or 500 and above, except
+       ``InsufficientCapacityException``.
+    3. A connection failure or a timeout, including botocore's
+       ``HTTPClientError`` family.
 
     Every other error fails the step at once. A ``ValidationException``, for
     example, fails the same way on every attempt.
@@ -85,5 +98,7 @@ def _is_retryable(error: Exception) -> bool:
     code = response.get("Error", {}).get("Code")
     if code in _RETRYABLE_ERROR_CODES:
         return True
+    if code in _NON_RETRYABLE_ERROR_CODES:
+        return False
     status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
     return isinstance(status, int) and (status == 429 or status >= 500)

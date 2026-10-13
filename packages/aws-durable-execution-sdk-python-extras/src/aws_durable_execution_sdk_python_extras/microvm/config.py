@@ -65,6 +65,12 @@ class MicrovmConfig:
     When it is set, a MicroVM that fails to boot or stops responding fails the
     operation after this time, instead of after ``timeout``. The MicroVM
     receives the value in the job document.
+
+    The heartbeat timeout starts when the callback is created, before the
+    launch. So it must cover the launch, with its retries, and the boot. A
+    throttled launch can take several minutes. A heartbeat timeout that is
+    shorter fails the operation with ``MicrovmTimeoutError`` before the
+    MicroVM can send its first heartbeat.
     """
 
     image_version: str | None = None
@@ -73,15 +79,17 @@ class MicrovmConfig:
     ingress_network_connectors: tuple[str, ...] | None = None
     """Ingress network connector ARNs.
 
-    Defaults to the Lambda-provided ``NO_INGRESS`` connector, because the job
-    arrives in the ``run`` hook and needs no inbound connection.
+    ``None`` gets the Lambda-provided ``NO_INGRESS`` connector, because the
+    job arrives in the ``run`` hook and needs no inbound connection. An empty
+    tuple sends no ingress connector.
     """
 
     egress_network_connectors: tuple[str, ...] | None = None
     """Egress network connector ARNs.
 
-    Defaults to the Lambda-provided ``INTERNET_EGRESS`` connector. The MicroVM
-    needs egress to reach the Lambda callback APIs.
+    ``None`` gets the Lambda-provided ``INTERNET_EGRESS`` connector. The
+    MicroVM needs egress to reach the Lambda callback APIs. An empty tuple
+    sends no egress connector.
     """
 
     logging: Mapping[str, Any] | None = None

@@ -97,7 +97,9 @@ class LaunchResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LaunchResult:
-        return cls(microvm_id=data["microvmId"], delivery=data["delivery"])
+        # A checkpoint without a delivery gets an empty one. The operation
+        # then terminates the MicroVM as for any delivery it does not know.
+        return cls(microvm_id=data["microvmId"], delivery=data.get("delivery", ""))
 
     def to_dict(self) -> dict[str, Any]:
         return {"microvmId": self.microvm_id, "delivery": self.delivery}
@@ -161,7 +163,8 @@ def microvm(
             operation starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
         MicrovmDeliveryError: When the job is too large for the ``run`` hook.
-        MicrovmJobFailedError: When the MicroVM reports a failure.
+        MicrovmJobFailedError: When the MicroVM reports a failure, or sends a
+            result that is not valid JSON.
         MicrovmTimeoutError: When no result or heartbeat arrives in time.
     """
     scope = _OperationScope.create(context, name, job_input, config)
@@ -256,6 +259,10 @@ class _OperationScope:
     def run_job(self, child: DurableContext, job_input: Any) -> Any:
         """Run the operation's durable operations in its child context."""
         name = self.name
+        # The payload without the callback ID is shorter than the full one.
+        # So a job that does not fit without the ID fails before the callback
+        # exists, and no callback is left open until its timeout.
+        self._require_run_hook(self._payload("", job_input), with_callback_id=False)
         callback: Callback = child.create_callback(
             name=f"{name}.callback",
             config=CallbackConfig(
@@ -268,35 +275,33 @@ class _OperationScope:
                 serdes=JsonSerDes(),
             ),
         )
-        payload = RunHookPayload(
-            region=self.region,
-            callback_id=callback.callback_id,
-            job_input=job_input,
-            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
-        ).to_json()
-        # The payload contains the callback ID, so its size is known only
+        payload = self._payload(callback.callback_id, job_input)
+        # The full payload contains the callback ID, so its size is known only
         # after the callback exists. The ID comes from the checkpoint on
         # replay, and the input must not change. So every replay reaches the
         # same decision.
-        if not fits_run_hook(payload):
-            msg = (
-                f'MicroVM "{name}": the job is {len(payload)} code points in the '
-                f"run hook payload, and the run hook accepts at most "
-                f"{MAX_RUN_HOOK_PAYLOAD_LENGTH}. Delivery over HTTP for larger "
-                "jobs is not available yet."
-            )
-            raise MicrovmDeliveryError(msg)
+        self._require_run_hook(payload, with_callback_id=True)
 
         try:
             launched = LaunchResult.from_dict(
                 child.step(
                     lambda _: self._launch(callback.callback_id, payload).to_dict(),
                     name=f"{name}.launch",
-                    config=StepConfig(retry_strategy=self.retry_strategy),
+                    config=StepConfig(
+                        retry_strategy=self.retry_strategy,
+                        # Plain JSON, as the JavaScript SDK checkpoints it. So
+                        # a reader of the execution history finds the
+                        # MicroVM ID. Changing the serdes later would break
+                        # the replay of executions in flight.
+                        serdes=JsonSerDes(),
+                    ),
                 )
             )
         except StepError as error:
-            msg = f'MicroVM "{name}": the launch failed: {error.message}'
+            # An exception without a message checkpoints none. Its type is
+            # then the only detail.
+            detail = error.message or error.error_type or "no message"
+            msg = f'MicroVM "{name}": the launch failed: {detail}'
             raise MicrovmLaunchError(
                 message=msg, data=error.data, stack_trace=error.stack_trace
             ) from error
@@ -323,6 +328,27 @@ class _OperationScope:
         self._terminate(child, microvm_id)
         return result
 
+    def _payload(self, callback_id: str, job_input: Any) -> str:
+        return RunHookPayload(
+            region=self.region,
+            callback_id=callback_id,
+            job_input=job_input,
+            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
+        ).to_json()
+
+    def _require_run_hook(self, payload: str, *, with_callback_id: bool) -> None:
+        """Raise ``MicrovmDeliveryError`` when ``payload`` is too large."""
+        if fits_run_hook(payload):
+            return
+        size = f"{len(payload)}" if with_callback_id else f"at least {len(payload)}"
+        msg = (
+            f'MicroVM "{self.name}": the job is {size} code points in the run '
+            f"hook payload, and the run hook accepts at most "
+            f"{MAX_RUN_HOOK_PAYLOAD_LENGTH}. Delivery over HTTP for larger jobs "
+            "is not available yet."
+        )
+        raise MicrovmDeliveryError(msg)
+
     def _launch(self, callback_id: str, payload: str) -> LaunchResult:
         """Call ``RunMicrovm``, and return what the launch step checkpoints."""
         config = self.config
@@ -332,13 +358,17 @@ class _OperationScope:
             # A callback ID can be 1,024 characters, and the client token
             # allows 128. The SHA-256 hex digest is 64 characters.
             "clientToken": hashlib.sha256(callback_id.encode()).hexdigest(),
+            # An explicit empty tuple stays empty. The service accepts 0 to
+            # 10 connectors, and only None gets the default.
             "ingressNetworkConnectors": list(
-                config.ingress_network_connectors
-                or (self._connector_arn("NO_INGRESS"),)
+                (self._connector_arn("NO_INGRESS"),)
+                if config.ingress_network_connectors is None
+                else config.ingress_network_connectors
             ),
             "egressNetworkConnectors": list(
-                config.egress_network_connectors
-                or (self._connector_arn("INTERNET_EGRESS"),)
+                (self._connector_arn("INTERNET_EGRESS"),)
+                if config.egress_network_connectors is None
+                else config.egress_network_connectors
             ),
             "maximumDurationInSeconds": min(
                 self.timeout_seconds + LAUNCH_MARGIN_SECONDS,
@@ -381,9 +411,9 @@ class _OperationScope:
             child.logger.error(
                 f'MicroVM "{self.name}": terminate failed for {microvm_id}. The '
                 "MicroVM keeps running, and is billed, until the platform ends "
-                "it at its maximum duration, the operation timeout plus 5 "
-                "minutes. A missing permission needs lambda:TerminateMicrovm in "
-                "the function's execution role.",
+                "it at its maximum duration: the operation timeout plus 5 "
+                "minutes, at most 8 hours. A missing permission needs "
+                "lambda:TerminateMicrovm in the function's execution role.",
                 extra={"microvmId": microvm_id, "error": error.message},
             )
 
@@ -420,11 +450,11 @@ class _OperationScope:
                 stack_trace=error.stack_trace,
             )
         # Any other failure, such as a result that is not valid JSON. The
-        # operation contains no caller code, so it is a MicroVM failure. The
-        # SDK checkpoints the class of a MicroVM error as its type. So the
-        # message names the original type.
+        # MicroVM sent the result, so the job failed, as in the JavaScript
+        # SDK. The SDK checkpoints the class of a MicroVM error as its type.
+        # So the message names the original type.
         detail = getattr(error, "message", None) or str(error)
-        return MicrovmError(
+        return MicrovmJobFailedError(
             message=(
                 f'MicroVM "{name}": the job result could not be read '
                 f"({type(error).__name__}): {detail}"
@@ -491,9 +521,16 @@ def _reported_error_type(callback: Callback) -> str | None:
     ``Error`` is the type that a worker reports for a value that is not an
     exception. It names nothing, so it is left out.
     """
-    error = callback.state.get_checkpoint_result(callback.operation_id).error
-    reported = None if error is None else error.type
-    return None if reported in {None, "", "Error"} else reported
+    try:
+        error = callback.state.get_checkpoint_result(callback.operation_id).error
+        reported = None if error is None else error.type
+    except (AttributeError, KeyError, TypeError):
+        # The internal shape changed in an SDK release. The type is only
+        # detail in the message, so the operation goes on without it.
+        return None
+    if not isinstance(reported, str) or reported in {"", "Error"}:
+        return None
+    return reported
 
 
 def _partition_and_region(arn: str) -> tuple[str, str]:

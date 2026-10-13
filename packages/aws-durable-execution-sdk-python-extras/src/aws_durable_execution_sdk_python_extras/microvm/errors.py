@@ -22,6 +22,11 @@ The operation raises the same class on the first run and on every replay:
 The registry also applies to a child context that the caller wraps around the
 operation, and to a ``map`` or ``parallel`` item. The caller then gets
 ``ChildContextError``, and its ``__cause__`` is the MicroVM error.
+
+The fully-qualified name is part of the checkpoint format. A checkpoint
+written by one release is replayed by the next. So the classes must stay in
+this module, with these names. A moved or renamed class is not found in the
+registry on replay, and the caller gets a plain ``MicrovmError`` instead.
 """
 
 from __future__ import annotations
@@ -89,6 +94,9 @@ class MicrovmJobFailedError(MicrovmError):
     The MicroVM reported the failure with
     ``SendDurableExecutionCallbackFailure``. The message includes the error
     type that the MicroVM reported, such as the job handler's exception class.
+
+    The operation also raises it when the MicroVM sent a result that is not
+    valid JSON, as the JavaScript operation does.
     """
 
 
