@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from aws_durable_execution_sdk_python.config import Duration
+from aws_durable_execution_sdk_python.exceptions import ValidationError
 
 from aws_durable_execution_sdk_python_extras.microvm import MicrovmConfig, microvm
 from aws_durable_execution_sdk_python_extras.microvm import operation
@@ -60,8 +61,22 @@ def config(**fields: Any) -> MicrovmConfig:
 def test_rejects_an_invalid_call_before_any_durable_operation(
     name: str, fields: dict[str, Any], message: str
 ) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValidationError, match=message):
         microvm(NoOperations(), name, job_input={}, config=config(**fields))  # type: ignore[arg-type]
+
+
+def test_raises_the_class_of_duration_for_every_invalid_timeout() -> None:
+    # Duration rejects a negative value itself. The operation rejects zero.
+    # Both raise the SDK's ValidationError.
+    with pytest.raises(ValidationError):
+        config(timeout=Duration.from_seconds(-1))
+    with pytest.raises(ValidationError, match="timeout must be between"):
+        microvm(
+            NoOperations(),  # type: ignore[arg-type]
+            "build",
+            job_input={},
+            config=config(timeout=Duration(0)),
+        )
 
 
 @pytest.mark.parametrize("job_input", [{1, 2}, math.nan, {"x": math.inf}])
@@ -73,7 +88,7 @@ def test_rejects_an_input_that_is_not_json(job_input: Any) -> None:
 def test_rejects_a_call_without_a_region(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AWS_REGION")
 
-    with pytest.raises(ValueError, match="cannot determine the AWS Region"):
+    with pytest.raises(ValidationError, match="cannot determine the AWS Region"):
         microvm(NoOperations("not-an-arn"), "build", job_input={}, config=config())  # type: ignore[arg-type]
 
 

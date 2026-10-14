@@ -5,15 +5,18 @@
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
+import boto3
 import pytest
 from aws_durable_execution_sdk_python.config import Duration
 from aws_durable_execution_sdk_python.context import DurableContext
+from aws_durable_execution_sdk_python.exceptions import ChildContextError
 from aws_durable_execution_sdk_python.execution import (
     InvocationStatus,
     durable_execution,
@@ -24,12 +27,15 @@ from aws_durable_execution_sdk_python_testing.runner import (
     DurableFunctionTestResult,
     DurableFunctionTestRunner,
 )
+from botocore.stub import ANY, Stubber
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     MAX_RUN_HOOK_PAYLOAD_LENGTH,
     MicrovmConfig,
     MicrovmError,
+    MicrovmJobFailedError,
     microvm,
+    operation,
 )
 from aws_durable_execution_sdk_python_extras.microvm.job import RunHookPayload
 
@@ -229,8 +235,6 @@ def test_fails_with_a_job_failed_error_for_a_result_that_is_not_json(
 def test_uses_the_default_client_of_the_region(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from aws_durable_execution_sdk_python_extras.microvm import operation
-
     client = fake_client()
     regions: list[str] = []
 
@@ -463,10 +467,6 @@ def test_runs_one_microvm_per_map_item(run: Any, fake_client: Any) -> None:
 
 def test_requests_match_the_lambda_microvms_api_model(run: Any) -> None:
     """botocore validates each request against the service model."""
-    import datetime
-
-    import boto3
-    from botocore.stub import ANY, Stubber
 
     client = boto3.session.Session().client("lambda-microvms", region_name="us-west-2")
     config = config_with(
@@ -514,9 +514,6 @@ def test_keeps_the_class_inside_the_callers_child_context(
     # The MicroVM classes are in the SDK's error registry. So a caller's own
     # child context rebuilds the MicroVM error as its __cause__, on the first
     # run and on replay alike.
-    from aws_durable_execution_sdk_python.exceptions import ChildContextError
-
-    from aws_durable_execution_sdk_python_extras.microvm import MicrovmJobFailedError
 
     config = config_with(fake_client())
 
@@ -575,7 +572,6 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A launch checkpoint from another release, for example after a rollback.
-    from aws_durable_execution_sdk_python_extras.microvm import operation
 
     original = operation._OperationScope._launch  # noqa: SLF001
 
@@ -599,8 +595,6 @@ def test_terminates_and_fails_for_a_delivery_that_it_does_not_know(
 def test_terminates_and_fails_for_a_launch_checkpoint_without_a_delivery(
     run: Any, fake_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from aws_durable_execution_sdk_python_extras.microvm import operation
-
     original = operation.LaunchResult.to_dict
 
     def without_delivery(self: Any) -> dict[str, Any]:
@@ -620,7 +614,6 @@ def test_terminates_and_fails_for_a_launch_checkpoint_without_a_delivery(
 def test_leaves_out_the_error_type_when_the_checkpoint_shape_changed() -> None:
     # The checkpoint state is internal to the SDK, and can change in a 2.x
     # release.
-    from aws_durable_execution_sdk_python_extras.microvm import operation
 
     callback: Any = SimpleNamespace(state=object(), operation_id="op")
 
@@ -640,3 +633,62 @@ def test_names_the_type_of_a_launch_error_without_a_message(
         "error": "MicrovmLaunchError",
         "message": 'MicroVM "build": the launch failed: RuntimeError',
     }
+
+
+def test_ends_the_cause_chain_of_the_raised_error(run: Any, fake_client: Any) -> None:
+    config = config_with(fake_client())
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        try:
+            microvm(context, "build", job_input=event, config=config)
+        except MicrovmError as error:
+            chain: list[str] = []
+            seen: set[int] = set()
+            current: BaseException | None = error
+            # A loop that follows __cause__ must reach None. The seen set
+            # stops this test on a cycle instead of hanging.
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                chain.append(type(current).__name__)
+                current = current.__cause__
+            return {"chain": chain, "ends": current is None}
+        return None
+
+    result = run(handler, {}, fail_with("RuntimeError", "broken"))
+
+    assert outcome(result) == {
+        "chain": [
+            "MicrovmJobFailedError",
+            "ChildContextError",
+            "MicrovmJobFailedError",
+        ],
+        "ends": True,
+    }
+
+
+def test_terminates_only_after_the_wait_for_the_result_ends(
+    run: Any, fake_client: Any
+) -> None:
+    # The first invocation suspends on the callback. A terminate in a
+    # finally around callback.result() would run in that invocation, while
+    # the MicroVM still runs the job.
+    invocations: list[int] = []
+    terminated_in: list[int] = []
+    client = fake_client(
+        terminates=[lambda request: terminated_in.append(len(invocations))]
+    )
+    config = config_with(client, timeout=Duration.from_seconds(2))
+
+    @durable_execution
+    def handler(event: Any, context: DurableContext) -> Any:
+        invocations.append(1)
+        try:
+            return microvm(context, "build", job_input=event, config=config)
+        except MicrovmError as error:
+            return type(error).__name__
+
+    result = run(handler, {})
+
+    assert outcome(result) == "MicrovmTimeoutError"
+    assert terminated_in == [2]

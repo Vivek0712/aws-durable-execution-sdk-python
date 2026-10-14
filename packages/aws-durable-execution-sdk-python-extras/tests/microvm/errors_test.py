@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import pytest
-from aws_durable_execution_sdk_python.exceptions import ChildContextError
+from aws_durable_execution_sdk_python.exceptions import (
+    ChildContextError,
+    DurableOperationError,
+)
 from aws_durable_execution_sdk_python.lambda_service import ErrorObject
 
 from aws_durable_execution_sdk_python_extras.microvm import (
@@ -66,8 +69,6 @@ def test_wraps_another_error_type_in_a_plain_microvm_error() -> None:
 
 
 def test_every_microvm_error_is_a_durable_operation_error() -> None:
-    from aws_durable_execution_sdk_python.exceptions import DurableOperationError
-
     assert issubclass(MicrovmError, DurableOperationError)
     for error_class in (
         MicrovmLaunchError,
@@ -89,8 +90,6 @@ def test_every_microvm_error_is_a_durable_operation_error() -> None:
     ],
 )
 def test_registers_each_class_with_the_sdk(error_class: type[MicrovmError]) -> None:
-    from aws_durable_execution_sdk_python.exceptions import DurableOperationError
-
     rebuilt = DurableOperationError.from_error_fields(
         error_type=f"{error_class.__module__}.{error_class.__qualname__}",
         message="m",

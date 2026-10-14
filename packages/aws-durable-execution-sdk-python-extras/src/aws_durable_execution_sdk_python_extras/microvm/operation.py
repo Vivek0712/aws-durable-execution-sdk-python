@@ -25,6 +25,7 @@ from aws_durable_execution_sdk_python.exceptions import (
     CallbackTimeoutError,
     ChildContextError,
     StepError,
+    ValidationError,
 )
 from aws_durable_execution_sdk_python.retries import RetryDecision
 from aws_durable_execution_sdk_python.serdes import JsonSerDes
@@ -157,8 +158,10 @@ def microvm(
         ``SendDurableExecutionCallbackSuccess``, parsed as JSON.
 
     Raises:
-        ValueError: When ``name`` or ``config`` is not valid, or the Region
-            cannot be determined. No durable operation starts.
+        ValidationError: When ``name`` or ``config`` is not valid, or the
+            Region cannot be determined. No durable operation starts. It is
+            the SDK's class, which ``Duration`` also raises for a negative
+            value.
         TypeError: When ``job_input`` is not JSON-serializable. No durable
             operation starts.
         MicrovmLaunchError: When ``RunMicrovm`` fails after all retries.
@@ -201,19 +204,19 @@ class _OperationScope:
         """Validate the call, before any durable operation starts.
 
         Raises:
-            ValueError: When ``name`` or ``config`` is not valid, or the
+            ValidationError: When ``name`` or ``config`` is not valid, or the
                 Region cannot be determined.
             TypeError: When ``job_input`` is not JSON-serializable.
         """
         if not isinstance(name, str) or not name:
             msg = "a MicroVM operation requires a non-empty name"
-            raise ValueError(msg)
+            raise ValidationError(msg)
         if not config.image_identifier:
             msg = f'MicroVM "{name}": image_identifier is required'
-            raise ValueError(msg)
+            raise ValidationError(msg)
         if not config.execution_role_arn:
             msg = f'MicroVM "{name}": execution_role_arn is required'
-            raise ValueError(msg)
+            raise ValidationError(msg)
         timeout_seconds = config.timeout.to_seconds()
         if not 1 <= timeout_seconds <= MAX_MICROVM_DURATION_SECONDS:
             msg = (
@@ -221,7 +224,7 @@ class _OperationScope:
                 f"{MAX_MICROVM_DURATION_SECONDS} seconds (8 hours), because a "
                 f"MicroVM lives at most 8 hours. Got {timeout_seconds} seconds."
             )
-            raise ValueError(msg)
+            raise ValidationError(msg)
         heartbeat_timeout_seconds = (
             None
             if config.heartbeat_timeout is None
@@ -229,7 +232,7 @@ class _OperationScope:
         )
         if heartbeat_timeout_seconds is not None and heartbeat_timeout_seconds < 1:
             msg = f'MicroVM "{name}": heartbeat_timeout must be at least 1 second'
-            raise ValueError(msg)
+            raise ValidationError(msg)
         try:
             json.dumps(job_input, allow_nan=False)
         except (TypeError, ValueError) as error:
@@ -245,7 +248,7 @@ class _OperationScope:
                 f'MicroVM "{name}": cannot determine the AWS Region. The durable '
                 "execution ARN has none, and AWS_REGION is not set."
             )
-            raise ValueError(msg)
+            raise ValidationError(msg)
         return cls(
             name=name,
             config=config,
@@ -299,8 +302,8 @@ class _OperationScope:
             )
         except StepError as error:
             # An exception without a message checkpoints none. Its type is
-            # then the only detail.
-            detail = error.message or error.error_type or "no message"
+            # then the only detail. DurableOperationError always sets a type.
+            detail = error.message or error.error_type
             msg = f'MicroVM "{name}": the launch failed: {detail}'
             raise MicrovmLaunchError(
                 message=msg, data=error.data, stack_trace=error.stack_trace
@@ -450,9 +453,10 @@ class _OperationScope:
                 stack_trace=error.stack_trace,
             )
         # Any other failure, such as a result that is not valid JSON. The
-        # MicroVM sent the result, so the job failed, as in the JavaScript
-        # SDK. The SDK checkpoints the class of a MicroVM error as its type.
-        # So the message names the original type.
+        # MicroVM sent the result, so the job failed. The JavaScript operation
+        # differs here: its SDK fails the invocation with SERDES_FAILED before
+        # the operation sees an error. The SDK checkpoints the class of a
+        # MicroVM error as its type. So the message names the original type.
         detail = getattr(error, "message", None) or str(error)
         return MicrovmJobFailedError(
             message=(

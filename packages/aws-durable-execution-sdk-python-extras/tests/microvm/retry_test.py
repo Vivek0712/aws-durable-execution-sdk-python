@@ -21,6 +21,7 @@ from botocore.exceptions import (
 
 from aws_durable_execution_sdk_python_extras.microvm import (
     default_microvm_retry_strategy,
+    retry,
 )
 
 
@@ -103,8 +104,6 @@ def test_stops_after_5_attempts_and_caps_the_delay_at_60_seconds(
 
 
 def test_caps_the_delay_at_60_seconds(make_error: Any, monkeypatch: Any) -> None:
-    from aws_durable_execution_sdk_python_extras.microvm import retry
-
     monkeypatch.setattr(retry, "MAX_ATTEMPTS", 10)
 
     decision = default_microvm_retry_strategy(make_error("ThrottlingException"), 7)

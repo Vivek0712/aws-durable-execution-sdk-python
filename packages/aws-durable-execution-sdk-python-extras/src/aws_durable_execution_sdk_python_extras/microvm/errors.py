@@ -52,10 +52,15 @@ class MicrovmError(DurableOperationError):
         """Return the MicroVM error that the operation's child context raised.
 
         1. The SDK rebuilds a registered MicroVM error type as its own class,
-           in ``__cause__``. That error is returned.
+           in ``__cause__``. A copy of that error is returned.
         2. Any other error type becomes a plain :class:`MicrovmError`. It keeps
            the original error type in ``error_type``. The operation contains no
            caller code, so every failure in it is a MicroVM failure.
+
+        The caller raises the result ``from error``. That sets the result's
+        ``__cause__`` to ``error``. So the result must not be
+        ``error.__cause__`` itself. Otherwise each error is the other's
+        ``__cause__``, and a loop that follows ``__cause__`` never ends.
 
         Args:
             name: The operation name, for the message of a plain MicrovmError.
@@ -63,7 +68,12 @@ class MicrovmError(DurableOperationError):
         """
         cause = error.__cause__
         if isinstance(cause, MicrovmError):
-            return cause
+            return type(cause)(
+                message=cause.message,
+                error_type=cause.error_type,
+                data=cause.data,
+                stack_trace=cause.stack_trace,
+            )
         return MicrovmError(
             message=f'MicroVM "{name}": {error.message}',
             error_type=error.error_type,
@@ -96,7 +106,8 @@ class MicrovmJobFailedError(MicrovmError):
     type that the MicroVM reported, such as the job handler's exception class.
 
     The operation also raises it when the MicroVM sent a result that is not
-    valid JSON, as the JavaScript operation does.
+    valid JSON. The JavaScript operation differs here: its SDK fails the
+    invocation with ``SERDES_FAILED`` before the operation sees an error.
     """
 
 
