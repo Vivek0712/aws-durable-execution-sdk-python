@@ -45,7 +45,7 @@ from aws_durable_execution_sdk_python.identifier import (
     OperationIdentifier,
     OperationIdNamespace,
 )
-from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject, OperationType
 from aws_durable_execution_sdk_python.operation.child import child_handler
 
 
@@ -184,6 +184,7 @@ class ConcurrentExecutor(Generic[CallableType, ResultType]):
                 executable.index
             ),
             sub_type=self.sub_type_iteration,
+            operation_type=OperationType.CONTEXT,
             parent_id=executor_context._parent_id,  # noqa: SLF001
             name=self.get_iteration_name(executable.index),
         )
